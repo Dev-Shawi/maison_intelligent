@@ -1,286 +1,275 @@
+
 #include <LCD_I2C.h>
 #include <AccelStepper.h>
 #include <HCSR04.h>
 
 #pragma region Configuration
 
-// Broches
-#define TRIG_PIN 5
-#define ECHO_PIN 6
-#define BUZZER_PIN 3
-#define LED_RED 8
-#define LED_BLUE 7
-#define MOTOR_IN1 10
-#define MOTOR_IN2 11
-#define MOTOR_IN3 12
-#define MOTOR_IN4 13
-
-// Constantes
-const String STUDENT_ID = "etd:2305204";
-const float 
-  DOOR_OPEN_DIST = 30.0,
-  DOOR_CLOSE_DIST = 60.0,
-  ALARM_DISTANCE = 15.0;
-
-const unsigned long
-  LCD_UPDATE_INTERVAL = 100,
-  SERIAL_UPDATE_INTERVAL = 100,
-  ALARM_TIMEOUT = 3000,
-  BLINK_INTERVAL = 200;
-
-// Moteur
-const float STEPS_PER_DEG = 2048.0 * (64.0 / 360.0);
-const int 
-  MOTOR_MIN_DEG = 10,
-  MOTOR_MAX_DEG = 170;
-
-// États
-enum SystemState {
-  INIT,
-  PORTE_FERMEE,
-  PORTE_OUVERTE,
-  OUVERTURE_EN_COURS,
-  FERMETURE_EN_COURS,
-  ALARME_ACTIVE
-};
-
-#pragma endregion
-
-#pragma region Déclarations
-
-// Composants
 LCD_I2C lcd(0x27, 16, 2);
-HCSR04 hc(TRIG_PIN, ECHO_PIN);
-AccelStepper stepper(AccelStepper::FULL4WIRE, MOTOR_IN1, MOTOR_IN2, MOTOR_IN3, MOTOR_IN4);
+HCSR04 hc(6, 7);
+AccelStepper stepper(AccelStepper::FULL4WIRE, 8, 10, 9, 11);
 
-// Variables globales
-SystemState systemState = INIT;
+const float STEPS_PER_DEG = 2048.0 * (64.0 / 360.0);
+const int MIN_DEG = 10;
+const int MAX_DEG = 170;
+const unsigned long MOVE_DURATION = 2000;
+
+// New pin definitions for Lab 05
+const int redPin = 2;
+const int bluePin = 3;
+const int buzzerPin = 4;
+
+enum AppState { INIT,FERME,OUVERT,OUVERTURE,FERMETURE };
+
+AppState appState = INIT;
 unsigned long currentTime = 0;
-float currentDistance = 0.0;
-int currentDegrees = MOTOR_MIN_DEG;
-bool ledToggle = false;
-unsigned long lastDetectionTime = 0;
-
-// Prototypes
-void gererEtats(unsigned long ct);
-void initialisation(unsigned long ct);
-void porteFermee(unsigned long ct);
-void porteOuverte(unsigned long ct);
-void ouverturePorte(unsigned long ct);
-void fermeturePorte(unsigned long ct);
-void alarmeActive(unsigned long ct);
-void miseAJourLCD(unsigned long ct);
-void gestionAlarme(unsigned long ct);
-void communicationSerie(unsigned long ct);
 
 #pragma endregion
 
-#pragma region Configuration initiale
+#pragma region Tâches
 
-void setup() {
-  Serial.begin(9600);
-  
-  // Configuration des broches
-  pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(LED_RED, OUTPUT);
-  pinMode(LED_BLUE, OUTPUT);
-  
-  // Initialisation LCD
-  lcd.begin();
-  lcd.backlight();
-  lcd.print("Labo 4A/5");
-  lcd.setCursor(0, 1);
-  lcd.print(STUDENT_ID);
+float mesureDistanceTask(unsigned long ct) {
+  static unsigned long lastTime = 0;
+  const unsigned long rate = 50;
+  static float lastDistance = 0.0;
 
-  // Configuration moteur
-  stepper.setMaxSpeed(300);
-  stepper.setAcceleration(500);
-  stepper.setCurrentPosition(degreesToSteps(MOTOR_MIN_DEG));
+  if (ct - lastTime < rate) return lastDistance;
+
+  lastTime = ct;
+  lastDistance = hc.dist();
+  return lastDistance;
 }
 
-#pragma endregion
+void lcdTask(unsigned long ct, float distance, int degres) {
+  static unsigned long lastTime = 0;
+  const unsigned long rate = 100;
 
-#pragma region Boucle principale
+  if (ct - lastTime < rate) return;
 
-void loop() {
-  currentTime = millis();
-  
-  // Tâche de mesure
-  static unsigned long lastMeasure;
-  if(currentTime - lastMeasure >= 50) {
-    currentDistance = hc.dist();
-    lastMeasure = currentTime;
-  }
-
-  // Gestion des états
-  gererEtats(currentTime);
-  
-  // Tâches périodiques
-  miseAJourLCD(currentTime);
-  gestionAlarme(currentTime);
-  communicationSerie(currentTime);
-}
-
-#pragma endregion
-
-#pragma region Gestion des états
-
-void gererEtats(unsigned long ct) {
-  switch(systemState) {
-    case INIT: initialisation(ct); break;
-    case PORTE_FERMEE: porteFermee(ct); break;
-    case PORTE_OUVERTE: porteOuverte(ct); break;
-    case OUVERTURE_EN_COURS: ouverturePorte(ct); break;
-    case FERMETURE_EN_COURS: fermeturePorte(ct); break;
-    case ALARME_ACTIVE: alarmeActive(ct); break;
-  }
-}
-
-void initialisation(unsigned long ct) {
-  static unsigned long startTime = ct;
-  
-  if(ct - startTime >= 2000) {
-    lcd.clear();
-    systemState = PORTE_FERMEE;
-  }
-}
-
-void porteFermee(unsigned long ct) {
-  if(currentDistance < DOOR_OPEN_DIST) {
-    systemState = OUVERTURE_EN_COURS;
-    stepper.enableOutputs();
-    stepper.moveTo(degreesToSteps(MOTOR_MAX_DEG));
-  }
-  
-  // Vérification alarme
-  if(currentDistance <= ALARM_DISTANCE && systemState != ALARME_ACTIVE) {
-    systemState = ALARME_ACTIVE;
-    lastDetectionTime = ct;
-  }
-}
-
-void porteOuverte(unsigned long ct) {
-  if(currentDistance > DOOR_CLOSE_DIST) {
-    systemState = FERMETURE_EN_COURS;
-    stepper.enableOutputs();
-    stepper.moveTo(degreesToSteps(MOTOR_MIN_DEG));
-  }
-  
-  // Vérification alarme
-  if(currentDistance <= ALARM_DISTANCE && systemState != ALARME_ACTIVE) {
-    systemState = ALARME_ACTIVE;
-    lastDetectionTime = ct;
-  }
-}
-
-void ouverturePorte(unsigned long ct) {
-  stepper.run();
-  currentDegrees = stepsToDegrees(stepper.currentPosition());
-  
-  if(stepper.distanceToGo() == 0) {
-    stepper.disableOutputs();
-    systemState = PORTE_OUVERTE;
-  }
-}
-
-void fermeturePorte(unsigned long ct) {
-  stepper.run();
-  currentDegrees = stepsToDegrees(stepper.currentPosition());
-  
-  if(stepper.distanceToGo() == 0) {
-    stepper.disableOutputs();
-    systemState = PORTE_FERMEE;
-  }
-}
-
-void alarmeActive(unsigned long ct) {
-  if(currentDistance > ALARM_DISTANCE) {
-    if(ct - lastDetectionTime > ALARM_TIMEOUT) {
-      systemState = (currentDegrees == MOTOR_MIN_DEG) ? PORTE_FERMEE : PORTE_OUVERTE;
-      noTone(BUZZER_PIN);
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_BLUE, LOW);
-    }
-  }
-  else {
-    lastDetectionTime = ct;
-  }
-}
-
-#pragma endregion
-
-#pragma region Tâches périodiques
-
-void miseAJourLCD(unsigned long ct) {
-  static unsigned long lastUpdate;
-  if(ct - lastUpdate < LCD_UPDATE_INTERVAL) return;
-  
+  lastTime = ct;
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Dist: ");
-  lcd.print(currentDistance, 1);
-  lcd.print("cm");
-  
+  lcd.print("Dist : ");
+  lcd.print(distance);
+  lcd.print(" cm");
+
   lcd.setCursor(0, 1);
-  switch(systemState) {
-    case ALARME_ACTIVE:
-      lcd.print("ALARME! ");
-      break;
-    case PORTE_FERMEE:
-      lcd.print("Porte fermee");
-      break;
-    case PORTE_OUVERTE:
-      lcd.print("Porte ouverte");
-      break;
-    default:
-      lcd.print("Deg: ");
-      lcd.print(currentDegrees);
-  }
-  
-  lastUpdate = ct;
-}
-
-void gestionAlarme(unsigned long ct) {
-  static unsigned long lastBlink;
-  
-  if(systemState == ALARME_ACTIVE) {
-    // Gyrophare
-    if(ct - lastBlink >= BLINK_INTERVAL) {
-      ledToggle = !ledToggle;
-      digitalWrite(LED_RED, ledToggle);
-      digitalWrite(LED_BLUE, !ledToggle);
-      lastBlink = ct;
-    }
-    
-    // Buzzer pulsé
-    tone(BUZZER_PIN, 1000 + (ct % 1000), 100);
+  if (appState == FERME) lcd.print("Port: Fermer");
+  else if (appState == OUVERT) lcd.print("Port: Ouverte");
+  else {
+    lcd.print("Porte: ");
+    lcd.print(degres);
+    lcd.print(" deg");
   }
 }
 
-void communicationSerie(unsigned long ct) {
-  static unsigned long lastUpdate;
-  if(ct - lastUpdate < SERIAL_UPDATE_INTERVAL) return;
-  
-  Serial.print("etd:");
-  Serial.print(STUDENT_ID);
-  Serial.print(",dist:");
-  Serial.print(currentDistance);
+void serialTask(unsigned long ct, float distance, int degres) {
+  static unsigned long lastTime = 0;
+  const unsigned long rate = 100;
+
+  if (ct - lastTime < rate) return;
+
+  lastTime = ct;
+
+  Serial.print("etd:2305204,dist:");
+  Serial.print(distance);
   Serial.print(",deg:");
-  Serial.println(currentDegrees);
-  
-  lastUpdate = ct;
+  Serial.println(degres);
+}
+
+// New task for handling the alarm system
+void alarmTask(unsigned long ct, float distance) {
+  static bool alarmActive = false;
+  static unsigned long lastDetectionTime = 0;
+  static unsigned long lastGyroChange = 0;
+  static bool gyroRed = false;
+
+  // Update last detection time if object is within 15 cm
+  if (distance <= 15.0) {
+    lastDetectionTime = ct;
+  }
+
+  // Check if alarm should be active (within 3 seconds of last detection)
+  bool shouldAlarmBeActive = (ct - lastDetectionTime) < 3000;
+
+  if (shouldAlarmBeActive) {
+    if (!alarmActive) {
+      // Activate alarm components
+      alarmActive = true;
+      tone(buzzerPin, 1000); // Start buzzer tone at 1000 Hz
+      lastGyroChange = ct; // Initialize gyro timing
+      gyroRed = false;
+      digitalWrite(bluePin, HIGH);
+      digitalWrite(redPin, LOW);
+    }
+
+    // Alternate between red and blue every 500 ms
+    if (ct - lastGyroChange >= 500) {
+      lastGyroChange = ct;
+      gyroRed = !gyroRed;
+      digitalWrite(redPin, gyroRed ? HIGH : LOW);
+      digitalWrite(bluePin, !gyroRed ? HIGH : LOW);
+    }
+  } else {
+    if (alarmActive) {
+      // Deactivate alarm components
+      alarmActive = false;
+      noTone(buzzerPin); // Stop buzzer
+      digitalWrite(redPin, LOW);
+      digitalWrite(bluePin, LOW);
+    }
+  }
 }
 
 #pragma endregion
 
-#pragma region Utilitaires moteur
+#pragma region États
 
-long degreesToSteps(int deg) {
+long degToSteps(int deg) {
   return deg * STEPS_PER_DEG;
 }
 
-int stepsToDegrees(long steps) {
-  return steps / STEPS_PER_DEG;
+void initState(unsigned long ct) {
+  static bool firstTime = true;
+  static unsigned long startTime = 0;
+
+  if (firstTime) {
+    lcd.begin();
+    lcd.backlight();
+    lcd.print("ETD:2305204");
+    lcd.setCursor(0, 1);
+    lcd.print("Labo 4A");  //
+
+
+    stepper.setMaxSpeed((MAX_DEG - MIN_DEG) * STEPS_PER_DEG / (MOVE_DURATION / 1000.0));
+    stepper.setAcceleration(1000);
+    startTime = ct;
+    firstTime = false;
+    return;
+  }
+
+  if (ct - startTime >= 2000) {
+    lcd.clear();
+    stepper.moveTo(degToSteps(MIN_DEG));
+    stepper.enableOutputs();
+    while (stepper.run())
+      ;
+    //stepper.disableOutputs();
+    appState = FERME;
+    firstTime = true;
+  }
 }
 
+void fermeState(unsigned long ct) {
+  static bool firstTime = true;
+
+  if (firstTime) {
+    stepper.disableOutputs();
+    firstTime = false;
+    return;
+  }
+
+  float distance = mesureDistanceTask(ct);
+
+  if (distance < 30) {
+    appState = OUVERTURE;
+    firstTime = true;
+  }
+}
+
+void ouvertState(unsigned long ct) {
+  static bool firstTime = true;
+
+  if (firstTime) {
+    stepper.disableOutputs();
+    firstTime = false;
+    return;
+  }
+
+  float distance = mesureDistanceTask(ct);
+
+  if (distance > 60) {
+    appState = FERMETURE;
+    firstTime = true;
+  }
+}
+
+void ouvertureState(unsigned long ct) {
+  static bool firstTime = true;
+
+  if (firstTime) {
+    stepper.enableOutputs();
+    stepper.moveTo(degToSteps(MAX_DEG));
+    firstTime = false;
+    return;
+  }
+
+  stepper.run();
+
+  if (stepper.distanceToGo() == 0) {
+    appState = OUVERT;
+    firstTime = true;
+  }
+}
+
+void fermetureState(unsigned long ct) {
+  static bool firstTime = true;
+
+  if (firstTime) {
+    stepper.enableOutputs();
+    stepper.moveTo(degToSteps(MIN_DEG));
+    firstTime = false;
+    return;
+  }
+
+  stepper.run();
+
+  if (stepper.distanceToGo() == 0) {
+    appState = FERME;
+    firstTime = true;
+  }
+}
+
+void stateManager(unsigned long ct) {
+  switch (appState) {
+    case INIT: initState(ct); break;
+    case FERME: fermeState(ct); break;
+    case OUVERT: ouvertState(ct); break;
+    case OUVERTURE: ouvertureState(ct); break;
+    case FERMETURE: fermetureState(ct); break;
+  }
+}
 #pragma endregion
+
+void setup() {
+  Serial.begin(9600);
+
+  // Initialize new pins for Lab 05
+  pinMode(redPin, OUTPUT);
+  pinMode(bluePin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(redPin, LOW);
+  digitalWrite(bluePin, LOW);
+  digitalWrite(buzzerPin, LOW);
+}
+
+Analyse bien le projet
+
+Remarque : Dans ce projet, nous avons 4 systèmes :
+
+Le système de lecture de la luminosité;
+Le système de lecture de la distance;
+Le systeme de moterStepper
+Le système d'affichage.
+
+void loop() {
+  currentTime = millis();
+
+  stateManager(currentTime);
+
+  float distance = mesureDistanceTask(currentTime);
+  int degres = stepper.currentPosition() / STEPS_PER_DEG;
+  lcdTask(currentTime, distance, degres);
+  serialTask(currentTime, distance, degres);
+  alarmTask(currentTime, distance); // Execute alarm task
+}
